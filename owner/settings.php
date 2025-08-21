@@ -99,7 +99,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 
                 if (empty($smtpHost) || empty($smtpUsername)) {
                     $error = 'SMTP Host and Username are required';
-                } elseif (empty($smtpPassword) && empty($settings['smtp_password'])) {
+                } elseif (empty($smtpPassword) && empty($settings['smtp_password'] ?? '')) {
                     $error = 'SMTP Password is required for first-time setup';
                 } else {
                     try {
@@ -150,13 +150,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (empty($testEmail) || !filter_var($testEmail, FILTER_VALIDATE_EMAIL)) {
                     $error = 'Valid email address is required for testing';
                 } else {
-                    require_once '../includes/email_functions.php';
-                    $result = test_email_configuration($testEmail, $pdo, $_SESSION['user_id']);
-                    
-                    if ($result['success']) {
-                        redirect_with_message('settings.php', 'Test email sent successfully!', 'success');
-                    } else {
-                        $error = 'Email test failed: ' . $result['message'];
+                    try {
+                        require_once '../includes/email_functions.php';
+                        $result = test_email_configuration($testEmail, $pdo, $_SESSION['user_id']);
+                        
+                        if ($result['success']) {
+                            redirect_with_message('settings.php', 'Test email sent successfully!', 'success');
+                        } else {
+                            $error = 'Email test failed: ' . $result['message'];
+                        }
+                    } catch (Exception $e) {
+                        $error = 'Email test error: ' . $e->getMessage();
                     }
                 }
                 break;

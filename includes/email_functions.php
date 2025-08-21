@@ -45,12 +45,18 @@ function send_email($to_email, $subject, $body, $attachment_path = null, $attach
         }
         
         // Log email attempt
-        $stmt = $pdo->prepare("
-            INSERT INTO email_logs (recipient_email, subject, email_type, status, admin_id) 
-            VALUES (?, ?, 'EXPORT', 'PENDING', ?)
-        ");
-        $stmt->execute([$to_email, $subject, $admin_id]);
-        $email_log_id = $pdo->lastInsertId();
+        $email_log_id = null;
+        try {
+            $stmt = $pdo->prepare("
+                INSERT INTO email_logs (recipient_email, subject, email_type, status, admin_id) 
+                VALUES (?, ?, 'EXPORT', 'PENDING', ?)
+            ");
+            $stmt->execute([$to_email, $subject, $admin_id]);
+            $email_log_id = $pdo->lastInsertId();
+        } catch (Exception $e) {
+            // Continue without logging if email_logs table doesn't exist
+            error_log("Email logging failed: " . $e->getMessage());
+        }
         
         if (PHPMAILER_AVAILABLE) {
             // Use PHPMailer
@@ -104,7 +110,7 @@ function send_email_phpmailer($to_email, $subject, $body, $attachment_path, $att
             $mail->Port = $settings['smtp_port'] ?? 587;
         } else {
             $mail->SMTPSecure = false;
-            $mail->SMTPAuth = false;
+            $mail->SMTPAuth = true; // Keep auth enabled even without encryption
             $mail->Port = $settings['smtp_port'] ?? 25;
         }
         
@@ -116,6 +122,9 @@ function send_email_phpmailer($to_email, $subject, $body, $attachment_path, $att
                 'allow_self_signed' => true
             )
         );
+        
+        // Set timeout
+        $mail->Timeout = 30;
         
         // Recipients
         $hotel_name = $settings['hotel_name'] ?? 'L.P.S.T Hotel';
@@ -136,12 +145,19 @@ function send_email_phpmailer($to_email, $subject, $body, $attachment_path, $att
         $mail->send();
         
         // Update email log with success
-        $stmt = $pdo->prepare("
-            UPDATE email_logs 
-            SET status = 'SENT', response_data = 'Email sent successfully via PHPMailer' 
-            WHERE id = ?
-        ");
-        $stmt->execute([$email_log_id]);
+        if ($email_log_id) {
+            try {
+                $stmt = $pdo->prepare("
+                    UPDATE email_logs 
+                    SET status = 'SENT', response_data = 'Email sent successfully via PHPMailer' 
+                    WHERE id = ?
+                ");
+                $stmt->execute([$email_log_id]);
+            } catch (Exception $e) {
+                // Continue even if logging fails
+                error_log("Email log update failed: " . $e->getMessage());
+            }
+        }
         
         return [
             'success' => true,
@@ -178,13 +194,18 @@ function send_email_fallback($to_email, $subject, $body, $attachment_path, $atta
             $message .= $body . "\r\n";
             
             // Attachment
-            $file_content = chunk_split(base64_encode(file_get_contents($attachment_path)));
-            $message .= "--$boundary\r\n";
-            $message .= "Content-Type: application/octet-stream; name=\"" . ($attachment_name ?: basename($attachment_path)) . "\"\r\n";
-            $message .= "Content-Transfer-Encoding: base64\r\n";
-            $message .= "Content-Disposition: attachment; filename=\"" . ($attachment_name ?: basename($attachment_path)) . "\"\r\n\r\n";
-            $message .= $file_content . "\r\n";
-            $message .= "--$boundary--\r\n";
+            if (is_readable($attachment_path)) {
+                $file_content = chunk_split(base64_encode(file_get_contents($attachment_path)));
+                $message .= "--$boundary\r\n";
+                $message .= "Content-Type: application/octet-stream; name=\"" . ($attachment_name ?: basename($attachment_path)) . "\"\r\n";
+                $message .= "Content-Transfer-Encoding: base64\r\n";
+                $message .= "Content-Disposition: attachment; filename=\"" . ($attachment_name ?: basename($attachment_path)) . "\"\r\n\r\n";
+                $message .= $file_content . "\r\n";
+                $message .= "--$boundary--\r\n";
+            } else {
+                // Skip attachment if not readable
+                $message .= "--$boundary--\r\n";
+            }
         } else {
             // Simple HTML email
             $headers .= "Content-Type: text/html; charset=UTF-8\r\n";
@@ -196,12 +217,19 @@ function send_email_fallback($to_email, $subject, $body, $attachment_path, $atta
         
         if ($result) {
             // Update email log with success
-            $stmt = $pdo->prepare("
-                UPDATE email_logs 
-                SET status = 'SENT', response_data = 'Email sent successfully via PHP mail()' 
-                WHERE id = ?
-            ");
-            $stmt->execute([$email_log_id]);
+            if ($email_log_id) {
+                try {
+                    $stmt = $pdo->prepare("
+                        UPDATE email_logs 
+                        SET status = 'SENT', response_data = 'Email sent successfully via PHP mail()' 
+                        WHERE id = ?
+                    ");
+                    $stmt->execute([$email_log_id]);
+                } catch (Exception $e) {
+                    // Continue even if logging fails
+                    error_log("Email log update failed: " . $e->getMessage());
+                }
+            }
             
             return [
                 'success' => true,
@@ -367,6 +395,36 @@ function send_export_email($to_email, $bookings, $filters, $pdo, $admin_id) {
  * Test email configuration
  */
 function test_email_configuration($test_email, $pdo, $admin_id) {
+    try {
+        // Validate email first
+        if (!filter_var($test_email, FILTER_VALIDATE_EMAIL)) {
+            throw new Exception('Invalid email address format');
+        }
+        
+        // Get current settings to validate configuration
+        $stmt = $pdo->prepare("
+            SELECT setting_key, setting_value 
+            FROM settings 
+            WHERE setting_key IN ('smtp_host', 'smtp_port', 'smtp_username', 'smtp_password', 'smtp_encryption', 'hotel_name')
+        ");
+        $stmt->execute();
+        $settings = [];
+        while ($row = $stmt->fetch()) {
+            $settings[$row['setting_key']] = $row['setting_value'];
+        }
+        
+        // Check if required settings exist
+        if (empty($settings['smtp_host']) || empty($settings['smtp_username']) || empty($settings['smtp_password'])) {
+            throw new Exception('SMTP configuration is incomplete. Please configure all required settings first.');
+        }
+        
+    } catch (Exception $e) {
+        return [
+            'success' => false,
+            'message' => $e->getMessage()
+        ];
+    }
+    
     $subject = 'L.P.S.T Bookings - Email Configuration Test';
     $body = "
     <html>
